@@ -1403,12 +1403,13 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback          Selector
-	cache             *SessionCache
-	matcher           *cliproxysession.MerklePrefixMatcher
-	subagentAffinity  bool
-	rebindOnQuotaOnly bool
-	rebindOnNever     bool
+	fallback                 Selector
+	cache                    *SessionCache
+	matcher                  *cliproxysession.MerklePrefixMatcher
+	subagentAffinity         bool
+	rebindOnQuotaOnly        bool
+	rebindOnNever            bool
+	preferClaudeSubscription bool
 }
 
 const (
@@ -1570,6 +1571,9 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+	// PreferClaudeSubscription returns eligible Claude API-key bindings to OAuth.
+	// Default false. RebindOn never and explicit credential pins take precedence.
+	PreferClaudeSubscription bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1594,12 +1598,13 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	}
 	rebindMode := normalizeSessionAffinityRebindOn(cfg.RebindOn)
 	return &SessionAffinitySelector{
-		fallback:          cfg.Fallback,
-		cache:             NewSessionCache(cfg.TTL),
-		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
-		subagentAffinity:  subagentAffinity,
-		rebindOnQuotaOnly: rebindMode == SessionAffinityRebindOnQuota,
-		rebindOnNever:     rebindMode == SessionAffinityRebindOnNever,
+		fallback:                 cfg.Fallback,
+		cache:                    NewSessionCache(cfg.TTL),
+		matcher:                  cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		subagentAffinity:         subagentAffinity,
+		rebindOnQuotaOnly:        rebindMode == SessionAffinityRebindOnQuota,
+		rebindOnNever:            rebindMode == SessionAffinityRebindOnNever,
+		preferClaudeSubscription: cfg.PreferClaudeSubscription,
 	}
 }
 
@@ -1615,8 +1620,9 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // matcher before retaining the legacy derived/hash fallback behavior.
 //
 // An established binding outranks credential priority: a bound credential that is still
-// available is reused even when a higher-priority credential recovers. Credential priority
-// applies to cold bindings, requests without a session, and genuine bound-credential
+// available is reused even when a higher-priority credential recovers. The opt-in Claude
+// subscription recovery policy is the sole exception for eligible API-key bindings.
+// Credential priority applies to cold bindings, requests without a session, and bound-credential
 // failover, so the fallback selector only ever receives the highest available priority tier.
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
@@ -1733,9 +1739,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				auth, errPick := s.pickBoundWithClaudeSubscription(ctx, provider, model, opts, available, auth, &reservation)
+				if errPick != nil {
+					return nil, errPick
+				}
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
+				return auth, nil
 			}
 		}
 		if s.rebindOnNever {
@@ -1780,9 +1790,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if parentAuthID := s.cache.latestSessionAuth(fallbackID, providers); parentAuthID != "" {
 			for _, auth := range available {
 				if auth.ID == parentAuthID {
+					auth, errPick := s.pickBoundWithClaudeSubscription(ctx, provider, model, opts, available, auth, &reservation)
+					if errPick != nil {
+						return nil, errPick
+					}
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
+					return auth, nil
 				}
 			}
 		}
@@ -1793,13 +1807,17 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
+						auth, errPick := s.pickBoundWithClaudeSubscription(ctx, provider, model, opts, available, auth, &reservation)
+						if errPick != nil {
+							return nil, errPick
+						}
 						bind(auth.ID, true)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
-						return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
+						return auth, nil
 					}
 				}
 			}
@@ -1878,9 +1896,16 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 
 	var preservedAuthID string
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
+		recoveringSubscription := false
 		for _, auth := range available {
 			if auth == nil || auth.ID != match.AuthID {
 				continue
+			}
+			if subscriptions := s.recoveredClaudeSubscriptions(opts, auth, available); len(subscriptions) > 0 {
+				// Continue through the normal matcher rebind path, preserving session lineage.
+				available = subscriptions
+				recoveringSubscription = true
+				break
 			}
 			if match.SessionID != "" {
 				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = match.SessionID
@@ -1947,7 +1972,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			entry.Infof("session-affinity: LCP cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.AuthID, errBound.Code, provider, model)
 			return nil, true, errBound
 		}
-		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
+		if !recoveringSubscription && !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
 			preservedAuthID = match.AuthID
 		}
 	}

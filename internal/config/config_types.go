@@ -587,7 +587,7 @@ type RoutingConfig struct {
 	// LCP compaction matching requires at least 2 shared trailing turns; clients whose
 	// compaction replaces all earlier turns with a summary should send X-Session-ID (or
 	// another explicit session ID), or affinity starts a new binding at every compaction.
-	// Automatic failover is always enabled when bound auth becomes unavailable.
+	// Failover behavior is controlled by SessionAffinityRebindOn.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
@@ -612,6 +612,13 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SessionAffinityPreferClaudeSubscription returns a Claude API-key binding to an
+	// eligible Claude OAuth credential on the next request. Healthy OAuth bindings stay
+	// sticky. Only the highest available priority tier is considered. Pins and hosted
+	// resource references are preserved. Default false; ignored when affinity is off
+	// or SessionAffinityRebindOn is "never".
+	SessionAffinityPreferClaudeSubscription bool `yaml:"session-affinity-prefer-claude-subscription,omitempty" json:"session-affinity-prefer-claude-subscription,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
