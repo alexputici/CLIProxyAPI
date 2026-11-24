@@ -1443,14 +1443,14 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 
 	close(loseFirst)
+	// The first reconnect can spend a full initial backoff in jitter. Allow
+	// heartbeat detection and scheduling as well, while observing the forbidden
+	// drain for the entire wait instead of sampling it during a fixed sleep.
 	select {
 	case <-started:
 		t.Fatal("heartbeat failover started draining the blocking scope")
-	case <-time.After(50 * time.Millisecond):
-	}
-	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(homeSubscriberRetryInitial + time.Second):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()

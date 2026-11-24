@@ -180,7 +180,11 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, soonest-reset-first
+  # soonest-reset-first prefers the earliest observed upcoming weekly reset for Claude/Codex OAuth.
+  # Priority and cooldown eligibility still apply. Unknown OAuth accounts rotate through one probe
+  # every eight fresh selections; equal resets or no known resets use round-robin.
+  # Enable session-affinity below to keep healthy sessions on their selected account.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # Sticky requests (including inherited and LCP bindings) also consume weighted credits
@@ -232,6 +236,16 @@ routing:
   #     keep the binding and return the error (or retry the same credential) instead.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
+  # Opt in to returning a bound Claude API key to an eligible Claude OAuth subscription
+  # on the next request after recovery. Healthy OAuth bindings remain sticky.
+  # Configure subscriptions at a higher priority than API keys to use API only as fallback.
+  # Respects the highest eligible priority tier, model cooldowns, and explicit account pins.
+  # Thread continuations, reused containers, native files and encrypted advisor results
+  # suppress this recovery switch. Existing failure handling still applies.
+  # The conversation/model/effort is unchanged; the upstream prompt cache may rebuild.
+  # Transient subscription failures may still use API credits under the normal retry policy.
+  # Default false. Ignored when affinity is false or session-affinity-rebind-on is "never".
+  session-affinity-prefer-claude-subscription: false
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
