@@ -111,27 +111,17 @@ func upcomingWeeklyReset(auth *Auth, now time.Time) time.Time {
 	if !supportsWeeklyReset(auth) {
 		return time.Time{}
 	}
-	signal := func(name string) string {
-		return strings.TrimSpace(auth.Quota.Signals[http.CanonicalHeaderKey(name)])
-	}
 	var reset time.Time
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
 	case "claude":
-		reset = parseWeeklyResetTime(signal("anthropic-ratelimit-unified-7d-reset"))
+		reset = parseWeeklyResetTime(strings.TrimSpace(auth.Quota.Signals[http.CanonicalHeaderKey("anthropic-ratelimit-unified-7d-reset")]))
 	case "codex":
 		for _, window := range []string{"primary", "secondary"} {
-			prefix := "x-codex-" + window
-			minutes, errMinutes := strconv.ParseInt(signal(prefix+"-window-minutes"), 10, 64)
+			minutes, errMinutes := strconv.ParseInt(codexQuotaSignal(auth, "x-codex-"+window+"-window-minutes"), 10, 64)
 			if errMinutes != nil || minutes != 7*24*60 {
 				continue
 			}
-			candidate := parseWeeklyResetTime(signal(prefix + "-reset-at"))
-			if candidate.IsZero() && !auth.Quota.ObservedAt.IsZero() {
-				seconds, errSeconds := strconv.ParseInt(signal(prefix+"-reset-after-seconds"), 10, 64)
-				if errSeconds == nil && seconds > 0 && seconds <= 7*24*60*60 {
-					candidate = auth.Quota.ObservedAt.Add(time.Duration(seconds) * time.Second)
-				}
-			}
+			candidate := codexWindowReset(auth, window)
 			if candidate.After(now) && (reset.IsZero() || candidate.Before(reset)) {
 				reset = candidate
 			}

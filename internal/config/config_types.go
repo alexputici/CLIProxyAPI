@@ -613,12 +613,14 @@ type RoutingConfig struct {
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
 
-	// SessionAffinityPreferClaudeSubscription returns a Claude API-key binding to an
-	// eligible Claude OAuth credential on the next request. Healthy OAuth bindings stay
-	// sticky. Only the highest available priority tier is considered. Pins and hosted
-	// resource references are preserved. Default false; ignored when affinity is off
-	// or SessionAffinityRebindOn is "never".
-	SessionAffinityPreferClaudeSubscription bool `yaml:"session-affinity-prefer-claude-subscription,omitempty" json:"session-affinity-prefer-claude-subscription,omitempty"`
+	// FundingOrder ranks what pays for a request, most preferred first. Classes are
+	// "allowance" (a subscription sign-in with plan allowance left), "api-credit" (an
+	// API key) and "usage-credit" (a subscription past its allowance that still answers
+	// by drawing paid credits). New sessions use the best class available, ahead of
+	// credential priority, and a bound session moves to a better class on its next
+	// portable request. It is a preference, not a spending cap. Empty disables ranking.
+	// Requires SessionAffinity; SessionAffinityRebindOn "never" keeps existing bindings.
+	FundingOrder []string `yaml:"funding-order,omitempty" json:"funding-order,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
