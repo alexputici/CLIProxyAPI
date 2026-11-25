@@ -56,12 +56,13 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy                                string
-	sessionAffinity                         bool
-	sessionAffinityTTL                      time.Duration
-	sessionAffinitySubagents                bool
-	sessionAffinityRebindOn                 string
-	sessionAffinityPreferClaudeSubscription bool
+	strategy                 string
+	sessionAffinity          bool
+	sessionAffinityTTL       time.Duration
+	sessionAffinitySubagents bool
+	sessionAffinityRebindOn  string
+	// fundingOrder is the validated order in its comma-joined form, so the state stays comparable.
+	fundingOrder string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -103,8 +104,23 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnNever
 		}
 	}
-	state.sessionAffinityPreferClaudeSubscription = state.sessionAffinity && state.sessionAffinityRebindOn != coreauth.SessionAffinityRebindOnNever && cfg.Routing.SessionAffinityPreferClaudeSubscription
+	if state.sessionAffinity {
+		order, errOrder := coreauth.ParseFundingOrder(cfg.Routing.FundingOrder)
+		if errOrder != nil {
+			log.Errorf("routing.funding-order is ignored: %v", errOrder)
+		}
+		state.fundingOrder = order.String()
+	}
 	return state
+}
+
+// fundingOrderFromState rebuilds the order validated by normalizedRoutingRuntimeState.
+func fundingOrderFromState(joined string) coreauth.FundingOrder {
+	if joined == "" {
+		return nil
+	}
+	order, _ := coreauth.ParseFundingOrder(strings.Split(joined, ","))
+	return order
 }
 
 func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
@@ -130,11 +146,11 @@ func newRoutingSelectorWithExisting(state routingRuntimeState, existing coreauth
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback:                 selector,
-			TTL:                      state.sessionAffinityTTL,
-			SubagentAffinity:         &subagents,
-			RebindOn:                 state.sessionAffinityRebindOn,
-			PreferClaudeSubscription: state.sessionAffinityPreferClaudeSubscription,
+			Fallback:         selector,
+			TTL:              state.sessionAffinityTTL,
+			SubagentAffinity: &subagents,
+			RebindOn:         state.sessionAffinityRebindOn,
+			FundingOrder:     fundingOrderFromState(state.fundingOrder),
 		})
 	}
 	return selector

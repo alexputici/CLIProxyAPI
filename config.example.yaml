@@ -236,16 +236,21 @@ routing:
   #     keep the binding and return the error (or retry the same credential) instead.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
-  # Opt in to returning a bound Claude API key to an eligible Claude OAuth subscription
-  # on the next request after recovery. Healthy OAuth bindings remain sticky.
-  # Configure subscriptions at a higher priority than API keys to use API only as fallback.
-  # Respects the highest eligible priority tier, model cooldowns, and explicit account pins.
-  # Thread continuations, reused containers, native files and encrypted advisor results
-  # suppress this recovery switch. Existing failure handling still applies.
-  # The conversation/model/effort is unchanged; the upstream prompt cache may rebuild.
-  # Transient subscription failures may still use API credits under the normal retry policy.
-  # Default false. Ignored when affinity is false or session-affinity-rebind-on is "never".
-  session-affinity-prefer-claude-subscription: false
+  # Rank what pays for a request, most preferred first. Classes:
+  #   allowance    - a subscription sign-in with plan allowance left
+  #   api-credit   - an API key
+  #   usage-credit - a subscription past its plan allowance that still answers by drawing
+  #                  paid credits (recognised for Codex from its quota headers)
+  # New sessions use the best class available, ahead of credential priority, which then
+  # orders credentials within the class. A bound session moves to a better class on its
+  # next portable request: account pins, Claude thread, container, file and advisor
+  # references, and Responses requests that name a previous response keep their account.
+  # The conversation, model and effort are unchanged; the upstream prompt cache may rebuild.
+  # This is a preference, not a spending cap: a lower class is used when nothing better
+  # is available, including on a transient failure under the normal retry policy.
+  # Classes left out rank last. Empty (default) disables ranking.
+  # Requires session-affinity. session-affinity-rebind-on "never" keeps existing bindings.
+  # funding-order: ["allowance", "api-credit", "usage-credit"]
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

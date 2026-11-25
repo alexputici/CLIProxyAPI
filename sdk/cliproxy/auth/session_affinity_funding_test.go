@@ -12,6 +12,8 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
+var defaultTestFundingOrder = FundingOrder{FundingAllowance, FundingAPICredit, FundingUsageCredit}
+
 func subscriptionRecoveryAuth(id, kind, priority string) *Auth {
 	return &Auth{ID: id, Provider: "claude", Status: StatusActive, Attributes: map[string]string{AttributeAuthKind: kind, "priority": priority}}
 }
@@ -29,7 +31,7 @@ func TestManagerSessionAffinityReturnsToClaudeSubscription(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				const model = "claude-subscription-recovery"
 				manager := NewManager(nil, nil, nil)
-				affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetFirstSelector{}, PreferClaudeSubscription: true})
+				affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetFirstSelector{}, FundingOrder: defaultTestFundingOrder})
 				defer affinity.Stop()
 				manager.SetSelector(affinity)
 				manager.RegisterExecutor(schedulerTestExecutor{provider: "claude"})
@@ -99,8 +101,17 @@ func TestSessionAffinityClaudeSubscriptionRecoveryBoundaries(t *testing.T) {
 		{name: "default unchanged"},
 		{name: "never", enabled: true, mode: "never"},
 		{name: "healthy OAuth stays", enabled: true, boundKind: AuthKindOAuth},
-		{name: "other provider stays", enabled: true, provider: "codex"},
-		{name: "lower priority subscription stays out", enabled: true, priority: "-1"},
+		{name: "applies to every provider", enabled: true, provider: "codex", wantSub: true},
+		{name: "stored response keeps its account", enabled: true, provider: "codex", body: `{"previous_response_id":"resp_owned","input":[]}`},
+		{name: "conversation keeps its account", enabled: true, provider: "codex", body: `{"conversation":{"id":"conv_owned"},"input":[]}`},
+		{name: "stored response in a WebSocket frame keeps its account", enabled: true, provider: "codex", body: `{"type":"response.create","response":{"previous_response_id":"resp_owned"}}`},
+		{name: "uploaded file keeps its account", enabled: true, provider: "codex", body: `{"input":[{"role":"user","content":[{"type":"input_file","file_id":"file_owned"}]}]}`},
+		{name: "container keeps its account", enabled: true, provider: "codex", body: `{"tools":[{"type":"code_interpreter","container":"cntr_owned"}],"input":[]}`},
+		{name: "container with files keeps its account", enabled: true, provider: "codex", body: `{"tools":[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_owned"]}}],"input":[]}`},
+		{name: "vector store keeps its account", enabled: true, provider: "codex", body: `{"tools":[{"type":"file_search","vector_store_ids":["vs_owned"]}],"input":[]}`},
+		{name: "automatic container is portable", enabled: true, provider: "codex", wantSub: true, body: `{"tools":[{"type":"code_interpreter","container":{"type":"auto"}}],"input":[{"role":"user","content":[{"type":"input_text","text":"continue"}]}]}`},
+		{name: "plain text input is portable", enabled: true, provider: "codex", wantSub: true, body: `{"input":"continue"}`},
+		{name: "funding class outranks credential priority", enabled: true, priority: "-1", wantSub: true},
 		{name: "pin stays", enabled: true, pinned: true},
 		{name: "file ownership stays", enabled: true, body: `{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file_owned"}}]}]}`},
 		{name: "container ownership stays", enabled: true, body: `{"container":"container_owned","messages":[{"role":"user","content":"continue"}]}`},
@@ -111,7 +122,11 @@ func TestSessionAffinityClaudeSubscriptionRecoveryBoundaries(t *testing.T) {
 		{name: "thread ownership stays", enabled: true, body: `{"thread":{"previous_message_id":"msg_owned"},"messages":[{"role":"user","content":"continue"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, PreferClaudeSubscription: tc.enabled, RebindOn: tc.mode})
+			var order FundingOrder
+			if tc.enabled {
+				order = defaultTestFundingOrder
+			}
+			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, FundingOrder: order, RebindOn: tc.mode})
 			defer selector.Stop()
 			kind := tc.boundKind
 			if kind == "" {
@@ -152,7 +167,7 @@ func TestSessionAffinityClaudeSubscriptionRecoveryBoundaries(t *testing.T) {
 }
 
 func TestSessionAffinityClaudeSubscriptionChildReturnsIndependently(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, PreferClaudeSubscription: true})
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, FundingOrder: defaultTestFundingOrder})
 	defer selector.Stop()
 	api := subscriptionRecoveryAuth("api", AuthKindAPIKey, "0")
 	sub := subscriptionRecoveryAuth("sub", AuthKindOAuth, "10")
@@ -188,7 +203,7 @@ func TestSessionAffinityClaudeSubscriptionChildReturnsIndependently(t *testing.T
 }
 
 func TestSessionAffinityClaudeSubscriptionRespectsModelCooldown(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, PreferClaudeSubscription: true})
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, FundingOrder: defaultTestFundingOrder})
 	defer selector.Stop()
 	api := subscriptionRecoveryAuth("api", AuthKindAPIKey, "0")
 	sub := subscriptionRecoveryAuth("sub", AuthKindOAuth, "10")
@@ -216,7 +231,7 @@ func TestSessionAffinityClaudeSubscriptionRespectsModelCooldown(t *testing.T) {
 
 func TestManagerClaudeSubscriptionRecoveryPreservesThreadOwner(t *testing.T) {
 	const model = "claude-subscription-thread-owner"
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, PreferClaudeSubscription: true})
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, FundingOrder: defaultTestFundingOrder})
 	defer selector.Stop()
 	manager := NewManager(nil, selector, nil)
 	owner, subscription := registerClaudeThreadTestAuths(t, manager, t.Name(), model)
@@ -247,7 +262,7 @@ func TestManagerClaudeSubscriptionRecoveryPreservesThreadOwner(t *testing.T) {
 
 func TestManagerClaudeSubscriptionRecoveryExecutionPreservesRequest(t *testing.T) {
 	const model = "claude-subscription-execution"
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetFirstSelector{}, PreferClaudeSubscription: true})
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetFirstSelector{}, FundingOrder: defaultTestFundingOrder})
 	defer selector.Stop()
 	manager := NewManager(nil, selector, nil)
 	sub, api := registerClaudeThreadTestAuths(t, manager, t.Name(), model)
@@ -298,7 +313,7 @@ func TestManagerClaudeSubscriptionRecoveryExecutionPreservesRequest(t *testing.T
 }
 
 func TestSessionAffinityClaudeSubscriptionLCPQuotaCommitsRecovery(t *testing.T) {
-	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, PreferClaudeSubscription: true, RebindOn: SessionAffinityRebindOnQuota})
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, FundingOrder: defaultTestFundingOrder, RebindOn: SessionAffinityRebindOnQuota})
 	defer selector.Stop()
 	api := subscriptionRecoveryAuth("api", AuthKindAPIKey, "0")
 	sub := subscriptionRecoveryAuth("sub", AuthKindOAuth, "10")
